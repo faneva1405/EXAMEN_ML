@@ -1,0 +1,589 @@
+# ==========================================
+# Importation des bibliothèques
+# ==========================================
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import warnings
+warnings.filterwarnings('ignore')
+
+# Scikit-learn
+from sklearn.model_selection import train_test_split, GridSearchCV, cross_val_score
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (accuracy_score, precision_score, recall_score,
+                             f1_score, confusion_matrix, classification_report,
+                             roc_curve, roc_auc_score, ConfusionMatrixDisplay)
+
+# XGBoost
+from xgboost import XGBClassifier
+
+# SMOTE pour le déséquilibre
+from imblearn.over_sampling import SMOTE
+
+# Style des graphiques
+sns.set_theme(style='darkgrid', palette='Set2')
+plt.rcParams['figure.figsize'] = (12, 6)
+plt.rcParams['font.size'] = 12
+
+print("[OK] Bibliothèques importées avec succès")
+print(f"  pandas v{pd.__version__}")
+print(f"  numpy v{np.__version__}")
+print(f"  sklearn v: {__import__('sklearn').__version__}")
+
+# ==========================================
+# Définition des noms de colonnes
+# ==========================================
+col_names = [
+    'duration', 'protocol_type', 'service', 'flag',
+    'src_bytes', 'dst_bytes', 'land', 'wrong_fragment', 'urgent',
+    'hot', 'num_failed_logins', 'logged_in', 'num_compromised',
+    'root_shell', 'su_attempted', 'num_root', 'num_file_creations',
+    'num_shells', 'num_access_files', 'num_outbound_cmds',
+    'is_host_login', 'is_guest_login', 'count', 'srv_count',
+    'serror_rate', 'srv_serror_rate', 'rerror_rate', 'srv_rerror_rate',
+    'same_srv_rate', 'diff_srv_rate', 'srv_diff_host_rate',
+    'dst_host_count', 'dst_host_srv_count', 'dst_host_same_srv_rate',
+    'dst_host_diff_srv_rate', 'dst_host_same_src_port_rate',
+    'dst_host_srv_diff_host_rate', 'dst_host_serror_rate',
+    'dst_host_srv_serror_rate', 'dst_host_rerror_rate',
+    'dst_host_srv_rerror_rate', 'attack_type', 'difficulty'
+]
+
+# ==========================================
+# Chargement des données
+# ==========================================
+train_path = "KDDTrain+.txt"
+test_path = "KDDTest+.txt"
+
+df_train = pd.read_csv(train_path, names=col_names)
+df_test = pd.read_csv(test_path, names=col_names)
+
+print(f"[OK] Données chargées avec succès")
+print(f"  Train: {df_train.shape[0]} lignes, {df_train.shape[1]} colonnes")
+print(f"  Test:  {df_test.shape[0]} lignes, {df_test.shape[1]} colonnes")
+
+# Aperçu des données
+df_train.head(3)
+
+# ==========================================
+# Informations générales sur le dataset
+# ==========================================
+print("=== INFORMATIONS TRAIN ===")
+print(f"Valeurs manquantes totales: {df_train.isnull().sum().sum()}")
+print(f"\nTypes de données:")
+print(df_train.dtypes.value_counts().to_string())
+print(f"\n=== Aperçu statistique ===")
+df_train.describe().T
+
+# ==========================================
+# Distribution des classes (binaire)
+# ==========================================
+# Création de la cible binaire
+df_train['binary_class'] = df_train['attack_type'].apply(
+    lambda x: 'normal' if x == 'normal' else 'attack'
+)
+df_test['binary_class'] = df_test['attack_type'].apply(
+    lambda x: 'normal' if x == 'normal' else 'attack'
+)
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+train_counts = df_train['binary_class'].value_counts()
+test_counts = df_test['binary_class'].value_counts()
+
+axes[0].pie(train_counts.values, labels=train_counts.index, autopct='%1.1f%%',
+            colors=['#4CAF50', '#F44336'], startangle=90, explode=[0.03, 0.03])
+axes[0].set_title('Distribution Train (Normal vs Attaque)', fontweight='bold')
+
+axes[1].pie(test_counts.values, labels=test_counts.index, autopct='%1.1f%%',
+            colors=['#4CAF50', '#F44336'], startangle=90, explode=[0.03, 0.03])
+axes[1].set_title('Distribution Test (Normal vs Attaque)', fontweight='bold')
+
+plt.tight_layout()
+plt.savefig('figures/class_distribution.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+print(f"\nTrain - Normal: {train_counts['normal']}, Attaque: {train_counts['attack']}")
+print(f"Test  - Normal: {test_counts['normal']}, Attaque: {test_counts['attack']}")
+
+# ==========================================
+# Distribution détaillée des types d'attaques
+# ==========================================
+attack_counts = df_train['attack_type'].value_counts()
+attack_types = {'DoS': ['back', 'land', 'neptune', 'pod', 'smurf', 'teardrop', 'apache2', 'udpstorm', 'processtable', 'worm'],
+                'Probe': ['satan', 'ipsweep', 'nmap', 'portsweep', 'mscan', 'saint'],
+                'R2L': ['guess_passwd', 'ftp_write', 'imap', 'phf', 'multihop', 'warezmaster', 'warezclient', 'spy', 'xlock', 'xsnoop', 'snmpguess', 'snmpgetattack', 'httptunnel', 'sendmail', 'named'],
+                'U2R': ['buffer_overflow', 'loadmodule', 'rootkit', 'perl', 'sqlattack', 'xterm', 'ps']}
+
+def get_attack_category(attack):
+    for cat, attacks in attack_types.items():
+        if attack in attacks:
+            return cat
+    return 'normal'
+
+df_train['attack_category'] = df_train['attack_type'].apply(get_attack_category)
+
+fig, ax = plt.subplots(figsize=(10, 6))
+cat_counts = df_train['attack_category'].value_counts()
+colors = {'normal': '#4CAF50', 'DoS': '#F44336', 'Probe': '#FF9800', 'R2L': '#2196F3', 'U2R': '#9C27B0'}
+bars = ax.bar(cat_counts.index, cat_counts.values,
+              color=[colors.get(x, '#888') for x in cat_counts.index], edgecolor='black')
+
+for bar, val in zip(bars, cat_counts.values):
+    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 50,
+            f'{val}', ha='center', fontweight='bold', fontsize=11)
+
+ax.set_title("Distribution des Catégories d'Attaques (Train)", fontweight="bold", fontsize=14)
+ax.set_ylabel("Nombre d'occurrences")
+ax.set_xlabel('Catégorie')
+plt.tight_layout()
+plt.savefig('figures/attack_category_distribution.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+print("\nCatégories d'attaques dans le train :")
+for cat, count in cat_counts.items():
+    pct = count / len(df_train) * 100
+    print(f"  {cat:10s} : {count:6d} ({pct:.1f}%)")
+
+# ==========================================
+# Analyse des variables catégorielles
+# ==========================================
+cat_cols = ['protocol_type', 'service', 'flag']
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+for i, col in enumerate(cat_cols):
+    counts = df_train[col].value_counts().head(10)
+    axes[i].barh(counts.index[::-1], counts.values[::-1], color=sns.color_palette("Set2", 10))
+    axes[i].set_title(f'Top 10 - {col}', fontweight='bold')
+    axes[i].set_xlabel("Nombre d'occurrences")
+
+plt.tight_layout()
+plt.savefig('figures/categorical_vars.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+print(f"\nValeurs uniques:")
+print(f"  protocol_type: {df_train['protocol_type'].nunique()} ({df_train['protocol_type'].unique()})")
+print(f"  service:       {df_train['service'].nunique()} valeurs")
+print(f"  flag:          {df_train['flag'].nunique()} valeurs")
+
+# ==========================================
+# Heatmap de corrélation (variables numériques)
+# ==========================================
+numeric_cols = df_train.select_dtypes(include=[np.number]).columns.drop(['difficulty'], errors='ignore')
+corr_matrix = df_train[numeric_cols].corr()
+
+plt.figure(figsize=(20, 16))
+mask = np.triu(np.ones_like(corr_matrix, dtype=bool))
+sns.heatmap(corr_matrix, mask=mask, annot=False, cmap='RdBu_r',
+            center=0, square=True, linewidths=0.5,
+            cbar_kws={'shrink': 0.8})
+plt.title('Matrice de Corrélation des Variables Numériques', fontweight='bold', fontsize=16)
+plt.tight_layout()
+plt.savefig('figures/correlation_heatmap.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+# Top corrélations
+corr_target = corr_matrix['src_bytes'].abs().sort_values(ascending=False)
+print("\nTop corrélations avec src_bytes:")
+for col, val in corr_target.head(10).items():
+    print(f"  {col:30s}: {val:.4f}")
+
+# ==========================================
+# Histogrammes des variables importantes
+# ==========================================
+important_features = ['src_bytes', 'dst_bytes', 'count', 'srv_count',
+                      'same_srv_rate', 'diff_srv_rate', 'dst_host_count',
+                      'dst_host_srv_count', 'duration', 'serror_rate']
+
+fig, axes = plt.subplots(5, 2, figsize=(16, 20))
+axes = axes.flatten()
+
+for i, feat in enumerate(important_features[:10]):
+    ax = axes[i]
+    # Distinguer normal vs attaque
+    normal_data = df_train[df_train['binary_class'] == 'normal'][feat]
+    attack_data = df_train[df_train['binary_class'] == 'attack'][feat]
+
+    # Limiter aux valeurs extrêmes pour meilleure visualisation
+    q99 = np.percentile(df_train[feat].dropna(), 99)
+    
+    ax.hist(normal_data[normal_data <= q99], bins=50, alpha=0.7, 
+            label='Normal', color='#4CAF50', density=True)
+    ax.hist(attack_data[attack_data <= q99], bins=50, alpha=0.7, 
+            label='Attaque', color='#F44336', density=True)
+    ax.set_title(f'Distribution de {feat}', fontweight='bold')
+    ax.set_ylabel('Densité')
+    ax.legend()
+
+plt.tight_layout()
+plt.savefig('figures/feature_histograms.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+# ==========================================
+# Séparation features / cible
+# ==========================================
+target_col = 'binary_class'
+feature_cols = col_names[:41]  # 41 features
+
+X_train_raw = df_train[feature_cols].copy()
+y_train_raw = df_train[target_col].copy()
+X_test_raw = df_test[feature_cols].copy()
+y_test_raw = df_test[target_col].copy()
+
+print(f"Train: X={X_train_raw.shape}, y={y_train_raw.shape}")
+print(f"Test:  X={X_test_raw.shape}, y={y_test_raw.shape}")
+
+# ==========================================
+# Encodage des variables catégorielles
+# ==========================================
+cat_features = ['protocol_type', 'service', 'flag']
+label_encoders = {}
+
+for col in cat_features:
+    le = LabelEncoder()
+    # Fit sur la combinaison train + test pour couvrir toutes les valeurs
+    combined = pd.concat([X_train_raw[col], X_test_raw[col]], axis=0).unique()
+    le.fit(combined)
+    X_train_raw[col] = le.transform(X_train_raw[col])
+    X_test_raw[col] = le.transform(X_test_raw[col])
+    label_encoders[col] = le
+    print(f"  {col}: {len(le.classes_)} classes encodées")
+
+# Encodage de la cible
+target_encoder = LabelEncoder()
+y_train = target_encoder.fit_transform(y_train_raw)
+y_test = target_encoder.transform(y_test_raw)
+print(f"\n  Target: {dict(zip(target_encoder.classes_, target_encoder.transform(target_encoder.classes_)))}")
+
+# ==========================================
+# Normalisation (StandardScaler)
+# ==========================================
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train_raw)
+X_test_scaled = scaler.transform(X_test_raw)
+
+print(f"\n[OK] Normalisation terminée")
+print(f"  Train: moyenne ≈ {X_train_scaled.mean():.6f}, std ≈ {X_train_scaled.std():.6f}")
+print(f"  Test:  moyenne ≈ {X_test_scaled.mean():.6f}, std ≈ {X_test_scaled.std():.6f}")
+
+# ==========================================
+# Application de SMOTE
+# ==========================================
+print(f"\n[OK] Application de SMOTE (k_neighbors=3)...")
+smote = SMOTE(random_state=42, k_neighbors=3)
+X_train_res, y_train_res = smote.fit_resample(X_train_scaled, y_train)
+
+# Vérification
+unique, counts = np.unique(y_train_res, return_counts=True)
+print(f"  Distribution après SMOTE:")
+for u, c in zip(unique, counts):
+    print(f"    {target_encoder.inverse_transform([u])[0]}: {c} ({c/len(y_train_res)*100:.1f}%)")
+
+# ==========================================
+# Fonction d'évaluation commune
+# ==========================================
+def evaluate_model(model, X_test, y_test, model_name, target_encoder):
+    """Évalue un modèle et retourne les métriques."""
+    y_pred = model.predict(X_test)
+    y_proba = model.predict_proba(X_test)[:, 1] if hasattr(model, 'predict_proba') else None
+
+    metrics = {
+        'Modèle': model_name,
+        'Accuracy': accuracy_score(y_test, y_pred),
+        'Precision': precision_score(y_test, y_pred),
+        'Recall': recall_score(y_test, y_pred),
+        'F1-Score': f1_score(y_test, y_pred)
+    }
+
+    # Matrice de confusion
+    cm = confusion_matrix(y_test, y_pred)
+
+    # ROC AUC
+    if y_proba is not None:
+        metrics['AUC'] = roc_auc_score(y_test, y_proba)
+
+    print(f"\n{'='*50}")
+    print(f"  {model_name}")
+    print(f"{'='*50}")
+    print(f"  Accuracy : {metrics['Accuracy']:.4f}")
+    print(f"  Precision: {metrics['Precision']:.4f}")
+    print(f"  Recall   : {metrics['Recall']:.4f}")
+    print(f"  F1-Score : {metrics['F1-Score']:.4f}")
+    if 'AUC' in metrics:
+        print(f"  AUC      : {metrics['AUC']:.4f}")
+    print(f"\n{classification_report(y_test, y_pred, target_names=target_encoder.classes_)}")
+
+    return metrics, cm, y_proba
+
+
+def plot_confusion_matrix(cm, model_name, target_encoder):
+    """Affiche la matrice de confusion."""
+    fig, ax = plt.subplots(figsize=(6, 5))
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm,
+                                   display_labels=target_encoder.classes_)
+    disp.plot(ax=ax, cmap='Blues', values_format='d')
+    ax.set_title(f'Matrice de Confusion - {model_name}', fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(f'figures/cm_{model_name.replace(" ", "_").lower()}.png',
+                dpi=150, bbox_inches='tight')
+    plt.show()
+
+
+def plot_roc_curve(y_test, probas_list, model_names):
+    """Trace les courbes ROC."""
+    plt.figure(figsize=(10, 7))
+    colors = ['#4CAF50', '#2196F3', '#FF9800']
+
+    for i, (probas, name) in enumerate(zip(probas_list, model_names)):
+        if probas is not None:
+            fpr, tpr, _ = roc_curve(y_test, probas)
+            auc = roc_auc_score(y_test, probas)
+            plt.plot(fpr, tpr, color=colors[i % len(colors)], lw=2.5,
+                     label=f'{name} (AUC = {auc:.4f})')
+
+    plt.plot([0, 1], [0, 1], 'k--', lw=1.5, label='Aléatoire (AUC = 0.5)')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('Taux de Faux Positifs (FPR)', fontsize=13)
+    plt.ylabel('Taux de Vrais Positifs (TPR)', fontsize=13)
+    plt.title('Courbes ROC - Comparaison des Modèles', fontweight='bold', fontsize=14)
+    plt.legend(loc='lower right', fontsize=11)
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig('figures/roc_curves.png', dpi=150, bbox_inches='tight')
+    plt.show()
+
+# ==========================================
+# Modèle 1 : Decision Tree
+# ==========================================
+print("\n" + "█"*50)
+print("  ENTRAÎNEMENT DU DECISION TREE")
+print("█"*50)
+
+dt_model = DecisionTreeClassifier(
+    max_depth=15,
+    min_samples_split=5,
+    min_samples_leaf=2,
+    random_state=42
+)
+
+dt_model.fit(X_train_res, y_train_res)
+dt_metrics, dt_cm, dt_proba = evaluate_model(
+    dt_model, X_test_scaled, y_test, 'Decision Tree', target_encoder
+)
+plot_confusion_matrix(dt_cm, 'Decision Tree', target_encoder)
+
+# ==========================================
+# Modèle 2 : Random Forest
+# ==========================================
+print("\n" + "█"*50)
+print("  ENTRAÎNEMENT DU RANDOM FOREST")
+print("█"*50)
+
+rf_model = RandomForestClassifier(
+    n_estimators=100,
+    max_depth=20,
+    min_samples_split=5,
+    min_samples_leaf=2,
+    n_jobs=-1,
+    random_state=42
+)
+
+rf_model.fit(X_train_res, y_train_res)
+rf_metrics, rf_cm, rf_proba = evaluate_model(
+    rf_model, X_test_scaled, y_test, 'Random Forest', target_encoder
+)
+plot_confusion_matrix(rf_cm, 'Random Forest', target_encoder)
+
+# ==========================================
+# Modèle 3 : XGBoost
+# ==========================================
+print("\n" + "█"*50)
+print("  ENTRAÎNEMENT DU XGBOOST")
+print("█"*50)
+
+xgb_model = XGBClassifier(
+    n_estimators=100,
+    max_depth=6,
+    learning_rate=0.1,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    use_label_encoder=False,
+    eval_metric='logloss',
+    random_state=42
+)
+
+xgb_model.fit(X_train_res, y_train_res)
+xgb_metrics, xgb_cm, xgb_proba = evaluate_model(
+    xgb_model, X_test_scaled, y_test, 'XGBoost', target_encoder
+)
+plot_confusion_matrix(xgb_cm, 'XGBoost', target_encoder)
+
+# ==========================================
+# Tableau comparatif des performances
+# ==========================================
+results_df = pd.DataFrame([dt_metrics, rf_metrics, xgb_metrics])
+results_df = results_df.set_index('Modèle')
+
+# Afficher le tableau
+fig, ax = plt.subplots(figsize=(10, 4))
+ax.axis('tight')
+ax.axis('off')
+table = ax.table(cellText=np.round(results_df.values, 4),
+                 colLabels=results_df.columns,
+                 rowLabels=results_df.index,
+                 cellLoc='center',
+                 loc='center',
+                 colColours=['#E8F5E9']*len(results_df.columns))
+table.auto_set_font_size(False)
+table.set_fontsize(11)
+table.scale(1.2, 1.8)
+ax.set_title('Tableau Comparatif des Performances', fontweight='bold', fontsize=14, pad=20)
+plt.tight_layout()
+plt.savefig('figures/comparison_table.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+print("\n=== TABLEAU COMPARATIF ===")
+print(results_df.to_string())
+print()
+
+# Meilleur modèle
+best_model_name = results_df['F1-Score'].idxmax()
+best_f1 = results_df.loc[best_model_name, 'F1-Score']
+print(f"[OK] Meilleur modèle (F1-Score): {best_model_name} ({best_f1:.4f})")
+
+# ==========================================
+# Courbes ROC - Tous les modèles
+# ==========================================
+plot_roc_curve(y_test,
+               [dt_proba, rf_proba, xgb_proba],
+               ['Decision Tree', 'Random Forest', 'XGBoost'])
+
+# ==========================================
+# Feature Importance - Random Forest
+# ==========================================
+importances_rf = rf_model.feature_importances_
+indices_rf = np.argsort(importances_rf)[::-1]
+
+# XGBoost
+importances_xgb = xgb_model.feature_importances_
+indices_xgb = np.argsort(importances_xgb)[::-1]
+
+fig, axes = plt.subplots(1, 2, figsize=(18, 8))
+
+# Random Forest
+axes[0].barh(range(15), importances_rf[indices_rf[:15]][::-1],
+             color=sns.color_palette("Blues_r", 15))
+axes[0].set_yticks(range(15))
+axes[0].set_yticklabels([feature_cols[i] for i in indices_rf[:15]][::-1])
+axes[0].set_title('Feature Importance - Random Forest', fontweight='bold')
+axes[0].set_xlabel('Importance relative')
+
+# XGBoost
+axes[1].barh(range(15), importances_xgb[indices_xgb[:15]][::-1],
+             color=sns.color_palette("Oranges_r", 15))
+axes[1].set_yticks(range(15))
+axes[1].set_yticklabels([feature_cols[i] for i in indices_xgb[:15]][::-1])
+axes[1].set_title('Feature Importance - XGBoost', fontweight='bold')
+axes[1].set_xlabel('Importance relative')
+
+plt.tight_layout()
+plt.savefig('figures/feature_importance.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+print("\n=== TOP 10 VARIABLES LES PLUS INFLUENTES ===")
+print(f"{'Rang':<5} {'Variable':<30} {'RF Importance':<15} {'XGB Importance':<15}")
+print("-"*65)
+for i in range(10):
+    rf_feat = feature_cols[indices_rf[i]]
+    xgb_feat = feature_cols[indices_xgb[i]]
+    rf_val = importances_rf[indices_rf[i]]
+    xgb_val = importances_xgb[indices_xgb[i]]
+    print(f"{i+1:<5} {rf_feat:<30} {rf_val:<15.4f} {xgb_val:<15.4f}")
+
+# ==========================================
+# Analyse des erreurs de classification
+# ==========================================
+y_pred_rf = rf_model.predict(X_test_scaled)
+
+# Identifier les erreurs
+errors_mask = y_pred_rf != y_test
+error_indices = np.where(errors_mask)[0]
+
+print(f"=== ANALYSE DES ERREURS (Random Forest) ===")
+print(f"Nombre total d'erreurs: {len(error_indices)} sur {len(y_test)} ({len(error_indices)/len(y_test)*100:.2f}%)")
+
+# Type d'erreurs
+fp_mask = (y_pred_rf == 1) & (y_test == 0)  # Fausses alertes
+fn_mask = (y_pred_rf == 0) & (y_test == 1)  # Attaques non détectées
+
+print(f"Fausses alertes (FP): {fp_mask.sum()}")
+print(f"Attaques non détectées (FN): {fn_mask.sum()}")
+
+# Analyser les attaques non détectées
+if fn_mask.sum() > 0:
+    print(f"\nTypes d'attaques les plus souvent non détectées:")
+    fn_attack_types = df_test.loc[fn_mask, 'attack_type'].value_counts().head(10)
+    for attack, count in fn_attack_types.items():
+        total = (df_test['attack_type'] == attack).sum()
+        print(f"  {attack:25s}: {count:3d}/{total:3d} non détectés ({count/total*100:.1f}%)")
+
+# ==========================================
+# GridSearchCV pour Random Forest
+# ==========================================
+print("=== GridSearchCV - Random Forest ===")
+print("Recherche des meilleurs hyperparamètres...")
+
+param_grid = {
+    'n_estimators': [50, 100],
+    'max_depth': [10, 15, 20],
+    'min_samples_split': [2, 5]
+}
+
+# Version réduite pour la démo (utiliser un échantillon)
+sample_size = min(20000, len(X_train_res))
+X_sample = X_train_res[:sample_size]
+y_sample = y_train_res[:sample_size]
+
+grid_rf = GridSearchCV(
+    RandomForestClassifier(random_state=42, n_jobs=-1),
+    param_grid,
+    cv=3,
+    scoring='f1',
+    n_jobs=-1,
+    verbose=1
+)
+
+grid_rf.fit(X_sample, y_sample)
+
+print(f"\nMeilleurs paramètres: {grid_rf.best_params_}")
+print(f"Meilleur score F1 (CV): {grid_rf.best_score_:.4f}")
+
+# Évaluer le meilleur modèle
+best_rf = grid_rf.best_estimator_
+y_pred_best = best_rf.predict(X_test_scaled)
+print(f"Accuracy (test): {accuracy_score(y_test, y_pred_best):.4f}")
+print(f"F1-Score (test): {f1_score(y_test, y_pred_best):.4f}")
+
+# ==========================================
+# Sauvegarde des modèles pour le déploiement
+# ==========================================
+import joblib
+import os
+
+os.makedirs('models', exist_ok=True)
+
+# Sauvegarder le meilleur modèle (Random Forest)
+joblib.dump(rf_model, 'models/random_forest_model.pkl')
+joblib.dump(target_encoder, 'models/target_encoder.pkl')
+joblib.dump(scaler, 'models/scaler.pkl')
+joblib.dump(label_encoders, 'models/label_encoders.pkl')
+
+print("[OK] Modèles sauvegardés dans le dossier 'models/'")
+print("  Fichiers:")
+for f in os.listdir('models'):
+    size = os.path.getsize(os.path.join('models', f))
+    print(f"    {f:30s} {size/1024:.1f} Ko")
